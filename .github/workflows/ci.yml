@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        ruby: ["3.2", "3.3", "3.4"]
+    steps:
+      # Clone main honker (we need honker-core + honker-extension to
+      # build the native extension the tests load).
+      - name: Checkout main honker
+        uses: actions/checkout@v4
+        with:
+          repository: russellromney/honker
+          path: main
+
+      # Overlay this PR's code on the submodule location so tests find
+      # everything where the existing find_extension helper expects
+      # (main/target/release/libhonker_ext.*).
+      - name: Prep submodule path
+        run: rm -rf main/packages/honker-ruby
+      - name: Checkout honker-ruby PR
+        uses: actions/checkout@v4
+        with:
+          path: main/packages/honker-ruby
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: main
+
+      - name: Build honker extension
+        working-directory: main
+        run: cargo build --release -p honker-extension
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+          working-directory: main/packages/honker-ruby
+
+      - name: Run tests
+        working-directory: main/packages/honker-ruby
+        run: |
+          bundle exec ruby -Ilib spec/honker_spec.rb
+          bundle exec ruby -Ilib spec/smoke_spec.rb
+          bundle exec ruby -Ilib spec/parity_spec.rb
