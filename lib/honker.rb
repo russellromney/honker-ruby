@@ -21,6 +21,10 @@ require "json"
 require "sqlite3"
 
 require_relative "honker/version"
+require_relative "honker/transaction"
+require_relative "honker/stream"
+require_relative "honker/scheduler"
+require_relative "honker/lock"
 
 module Honker
   DEFAULT_PRAGMAS = <<~SQL
@@ -65,10 +69,116 @@ module Honker
       )
     end
 
+    # Returns a Stream handle for an append-only ordered log.
+    def stream(name)
+      Stream.new(self, name)
+    end
+
+    # Returns the cron-style Scheduler facade. Cheap — no allocation
+    # beyond the wrapper object.
+    def scheduler
+      Scheduler.new(self)
+    end
+
     # Fire a pg_notify-style pub/sub signal. Returns the notification id.
     def notify(channel, payload)
       row = @db.get_first_row("SELECT notify(?, ?)", [channel, JSON.dump(payload)])
       row[0]
+    end
+
+    # Fire a notification inside an open transaction. The signal lands
+    # only when the transaction commits.
+    def notify_tx(tx, channel, payload)
+      row = tx.query_row(
+        "SELECT notify(?, ?)",
+        [channel, JSON.dump(payload)],
+      )
+      row[0]
+    end
+
+    # Run a block inside a SQLite transaction. The block receives a
+    # Honker::Transaction; returning normally commits, raising rolls
+    # back, and `tx.rollback!` rolls back without surfacing an error.
+    #
+    #   db.transaction do |tx|
+    #     tx.execute("INSERT INTO orders ...")
+    #     q.enqueue_tx(tx, {order_id: 1})
+    #   end
+    def transaction
+      tx = Transaction.new(@db)
+      begin
+        @db.transaction do
+          yield tx
+        end
+      rescue Transaction::Rollback
+        # Caller used tx.rollback! to abort. The block exited with an
+        # exception so the sqlite3 gem already rolled back — just
+        # swallow the sentinel.
+        nil
+      end
+    end
+
+    # Try to acquire an advisory lock. Returns a `Lock` handle on
+    # success, `nil` if another owner holds it.
+    def try_lock(name, owner:, ttl_s:)
+      acquired = @db.get_first_row(
+        "SELECT honker_lock_acquire(?, ?, ?)",
+        [name, owner, ttl_s],
+      )[0]
+      return nil unless acquired == 1
+
+      Lock.new(self, name, owner)
+    end
+
+    # Fixed-window rate limiter. Returns true if this call fits within
+    # `limit` requests per `per` seconds.
+    def try_rate_limit(name, limit:, per:)
+      @db.get_first_row(
+        "SELECT honker_rate_limit_try(?, ?, ?)",
+        [name, limit, per],
+      )[0] == 1
+    end
+
+    # Sweep old rate-limit window rows. Returns count deleted.
+    def sweep_rate_limits(older_than_s:)
+      @db.get_first_row(
+        "SELECT honker_rate_limit_sweep(?)",
+        [older_than_s],
+      )[0]
+    end
+
+    # Persist a job result for later retrieval via `get_result`.
+    # `value` is stored verbatim — JSON-encode it yourself if you want
+    # to round-trip structured data.
+    def save_result(job_id, value, ttl_s:)
+      @db.get_first_row(
+        "SELECT honker_result_save(?, ?, ?)",
+        [job_id, value, ttl_s],
+      )
+      nil
+    end
+
+    # Fetch a stored result, or nil if absent or expired.
+    def get_result(job_id)
+      @db.get_first_row(
+        "SELECT honker_result_get(?)",
+        [job_id],
+      )[0]
+    end
+
+    # Drop expired result rows. Returns count swept.
+    def sweep_results
+      @db.get_first_row("SELECT honker_result_sweep()")[0]
+    end
+
+    # Delete notifications older than `older_than_s` seconds. Returns
+    # the number of rows deleted.
+    def prune_notifications(older_than_s:)
+      @db.execute(
+        "DELETE FROM _honker_notifications WHERE created_at < unixepoch() - ?",
+        [older_than_s],
+      )
+      @db.changes
     end
   end
 
@@ -93,6 +203,16 @@ module Honker
       row[0]
     end
 
+    # Enqueue inside an open transaction. Atomic with whatever else ran
+    # on the same tx.
+    def enqueue_tx(tx, payload, delay: nil, run_at: nil, priority: 0, expires: nil)
+      row = tx.query_row(
+        "SELECT honker_enqueue(?, ?, ?, ?, ?, ?, ?)",
+        [@name, JSON.dump(payload), run_at, delay, priority, @max_attempts, expires],
+      )
+      row[0]
+    end
+
     # Claim up to n jobs atomically. Returns an array of Job.
     def claim_batch(worker_id, n)
       rows_json = @db.db.get_first_row(
@@ -105,6 +225,23 @@ module Honker
     # Claim a single job or nil if the queue is empty.
     def claim_one(worker_id)
       claim_batch(worker_id, 1).first
+    end
+
+    # Ack multiple jobs in one transaction. Returns the number acked.
+    def ack_batch(ids, worker_id)
+      @db.db.get_first_row(
+        "SELECT honker_ack_batch(?, ?)",
+        [JSON.dump(ids), worker_id],
+      )[0]
+    end
+
+    # Sweep this queue's expired claims back to pending. Returns the
+    # number of rows reclaimed.
+    def sweep_expired
+      @db.db.get_first_row(
+        "SELECT honker_sweep_expired(?)",
+        [@name],
+      )[0]
     end
 
     # Internal: invoked by Job#ack.
