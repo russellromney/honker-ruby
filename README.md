@@ -69,7 +69,7 @@ Fire a `pg_notify`-style signal. Returns the notification id.
 
 ## What's not here yet
 
-- `listen` / WAL-based async iterator (watcher API — in progress)
+- `listen` / update-watcher async iterator (in progress)
 - Streams (durable pub/sub with per-consumer offsets)
 - Scheduler (cron-style periodic tasks)
 
