@@ -1,6 +1,6 @@
 # honker (Ruby)
 
-Ruby binding for [Honker](https://honker.dev) — durable queues, streams, pub/sub, and scheduler on SQLite.
+Ruby binding for [Honker](https://honker.dev) — durable queues, streams, pub/sub, and time-trigger scheduling on SQLite.
 
 ## Install
 
@@ -67,13 +67,26 @@ Claim lifecycle. `ack` deletes. `retry` puts back with a delay (or moves to `_ho
 
 Fire a `pg_notify`-style signal. Returns the notification id.
 
+### `Database#stream(name)`
+
+Durable pub/sub with per-consumer offsets.
+
+### `Database#scheduler`
+
+Time-trigger scheduler facade.
+
+`Scheduler#add(name:, queue:, schedule:, payload:, priority:, expires_s:)`
+is the canonical recurring-registration surface. `schedule:` accepts:
+
+- 5-field cron
+- 6-field cron
+- `@every <n><unit>` like `@every 1s`
+
+`cron:` still works as a backward-compatible alias.
+
 ## What's not here yet
 
-- `listen` / update-watcher async iterator (in progress)
-- Streams (durable pub/sub with per-consumer offsets)
-- Scheduler (cron-style periodic tasks)
-
-All available via raw SQL on the same database (`db.db.execute("SELECT honker_stream_publish(...)")`). Idiomatic Ruby wrappers coming in a future release.
+- `listen` / update-watcher async iterator
 
 ## Testing
 

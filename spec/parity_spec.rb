@@ -161,14 +161,14 @@ class HonkerParityTest < Minitest::Test
 
   def test_scheduler_add_and_soonest
     sch = @db.scheduler
-    sch.add(name: "hourly", queue: "health", cron: "0 * * * *", payload: {})
+    sch.add(name: "hourly", queue: "health", schedule: "0 * * * *", payload: {})
     soonest = sch.soonest
     assert soonest > 0
   end
 
   def test_scheduler_remove
     sch = @db.scheduler
-    sch.add(name: "nightly", queue: "health", cron: "0 0 * * *", payload: {})
+    sch.add(name: "nightly", queue: "health", schedule: "0 0 * * *", payload: {})
     removed = sch.remove("nightly")
     assert_equal 1, removed
     assert_equal 0, sch.soonest
@@ -177,7 +177,7 @@ class HonkerParityTest < Minitest::Test
   def test_scheduler_tick_fires_due_task
     sch = @db.scheduler
     # "* * * * *" fires every minute — next_fire_at lands within a minute.
-    sch.add(name: "every-min", queue: "beats", cron: "* * * * *", payload: { ok: true })
+    sch.add(name: "every-min", queue: "beats", schedule: "* * * * *", payload: { ok: true })
     # Tick far enough in the future to guarantee a fire.
     fires = sch.tick(Time.now.to_i + 3_600)
     assert fires.length >= 1
@@ -196,6 +196,13 @@ class HonkerParityTest < Minitest::Test
     fires = sch.tick(soonest)
     assert_equal 1, fires.length
     assert_equal "fast", fires.first.name
+  end
+
+  def test_scheduler_accepts_legacy_cron_alias
+    sch = @db.scheduler
+    sch.add(name: "legacy", queue: "beats", cron: "@every 1s", payload: { ok: true })
+    soonest = sch.soonest
+    assert soonest > 0
   end
 
   def test_scheduler_run_start_and_stop

@@ -74,7 +74,7 @@ module Honker
       Stream.new(self, name)
     end
 
-    # Returns the cron-style Scheduler facade. Cheap — no allocation
+    # Returns the time-trigger Scheduler facade. Cheap — no allocation
     # beyond the wrapper object.
     def scheduler
       Scheduler.new(self)
