@@ -10,7 +10,7 @@ module Honker
     end
   end
 
-  # Cron-style scheduler. Register tasks with `add`; `tick` fires all
+  # Time-trigger scheduler. Register tasks with `add`; `tick` fires all
   # boundaries that have elapsed since the last tick and enqueues the
   # resulting jobs. `run(owner:, stop:)` drives the loop under a
   # leader-elected advisory lock.
@@ -28,18 +28,30 @@ module Honker
     # write; too large and a standby waits longer than necessary after
     # a crash. Matches the Rust binding.
     HEARTBEAT_S = 20
+    UPDATE_POLL_S = 0.05
 
     def initialize(db)
       @db = db
     end
 
-    # Register a cron-scheduled task. Idempotent by `name`; registering
-    # the same name twice replaces the previous row.
-    def add(name:, queue:, cron:, payload:, priority: 0, expires_s: nil)
+    # Register a scheduled task. `cron:` is kept for backward
+    # compatibility; `schedule:` is the clearer name and can hold:
+    #
+    # - 5-field cron
+    # - 6-field cron
+    # - `@every <n><unit>` like `@every 1s`
+    #
+    # Idempotent by `name`; registering the same name twice replaces
+    # the previous row.
+    def add(name:, queue:, cron: nil, schedule: nil, payload:, priority: 0, expires_s: nil)
+      expr = schedule || cron
+      raise ArgumentError, "must provide cron: or schedule:" if expr.nil? || expr.empty?
+
       @db.db.get_first_row(
         "SELECT honker_scheduler_register(?, ?, ?, ?, ?, ?)",
-        [name, queue, cron, JSON.dump(payload), priority, expires_s],
+        [name, queue, expr, JSON.dump(payload), priority, expires_s],
       )
+      @db.mark_updated
       nil
     end
 
@@ -49,7 +61,7 @@ module Honker
       @db.db.get_first_row(
         "SELECT honker_scheduler_unregister(?)",
         [name],
-      )[0]
+      )[0].tap { @db.mark_updated }
     end
 
     # Fire all due boundaries at `now`. Returns an array of
@@ -86,7 +98,7 @@ module Honker
       until stop_fn.call
         acquired = lock_try_acquire(LEADER_LOCK, owner, LOCK_TTL_S)
         unless acquired
-          sleep_with_stop(5, stop_fn)
+          wait_for_update_or_timeout(5, stop_fn)
           next
         end
 
@@ -113,16 +125,6 @@ module Honker
             "stop must be callable (proc/lambda) or respond to :stop?"
     end
 
-    # Break sleeps into 1s increments so `stop` is honored promptly
-    # without busy-waiting.
-    def sleep_with_stop(total_s, stop_fn)
-      elapsed = 0
-      while elapsed < total_s && !stop_fn.call
-        sleep(1)
-        elapsed += 1
-      end
-    end
-
     def leader_loop(owner, stop_fn)
       last_heartbeat = monotonic_now
       until stop_fn.call
@@ -138,12 +140,47 @@ module Honker
 
           last_heartbeat = monotonic_now
         end
-        sleep(1)
+
+        wait_s = HEARTBEAT_S - (monotonic_now - last_heartbeat)
+        wait_s = 0 if wait_s.negative?
+
+        next_fire = soonest
+        if next_fire.positive?
+          until_next = next_fire - Time.now.to_i
+          until_next = 0 if until_next.negative?
+          wait_s = [wait_s, until_next].min
+        end
+
+        wait_for_update_or_timeout(wait_s, stop_fn)
       end
     end
 
     def monotonic_now
       Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
+
+    def data_version
+      @db.db.get_first_row("PRAGMA data_version")[0].to_i
+    end
+
+    def wait_for_update_or_timeout(total_s, stop_fn)
+      return if total_s <= 0
+
+      deadline = monotonic_now + total_s
+      last_version = data_version
+      last_local = @db.update_snapshot
+
+      until stop_fn.call
+        now = monotonic_now
+        break if now >= deadline
+
+        slice = [UPDATE_POLL_S, deadline - now].min
+        sleep(slice)
+
+        version = data_version
+        local = @db.update_snapshot
+        return if version != last_version || local != last_local
+      end
     end
 
     def lock_try_acquire(name, owner, ttl_s)

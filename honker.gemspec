@@ -10,7 +10,7 @@ Gem::Specification.new do |spec|
   spec.summary       = "Durable queues, streams, pub/sub, and scheduler on SQLite."
   spec.description   = <<~DESC.strip
     Ruby binding for Honker — a SQLite-native task runtime. Queues,
-    streams, pub/sub, cron scheduler, results, locks, rate limits, all
+    streams, pub/sub, time-trigger scheduler, results, locks, rate limits, all
     in one .db file. Thin wrapper around the Honker SQLite loadable
     extension; no Redis, no external broker.
   DESC

@@ -45,6 +45,7 @@ module Honker
 
     def initialize(path, extension_path:)
       @db = SQLite3::Database.new(path)
+      @local_update_seq = 0
       @db.enable_load_extension(true)
       @db.load_extension(extension_path)
       @db.enable_load_extension(false)
@@ -54,6 +55,14 @@ module Honker
 
     def close
       @db&.close
+    end
+
+    def mark_updated
+      @local_update_seq += 1
+    end
+
+    def update_snapshot
+      @local_update_seq
     end
 
     # Returns a Queue handle for a named queue.
@@ -74,7 +83,7 @@ module Honker
       Stream.new(self, name)
     end
 
-    # Returns the cron-style Scheduler facade. Cheap — no allocation
+    # Returns the time-trigger Scheduler facade. Cheap — no allocation
     # beyond the wrapper object.
     def scheduler
       Scheduler.new(self)

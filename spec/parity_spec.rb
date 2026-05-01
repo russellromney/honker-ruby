@@ -161,14 +161,14 @@ class HonkerParityTest < Minitest::Test
 
   def test_scheduler_add_and_soonest
     sch = @db.scheduler
-    sch.add(name: "hourly", queue: "health", cron: "0 * * * *", payload: {})
+    sch.add(name: "hourly", queue: "health", schedule: "0 * * * *", payload: {})
     soonest = sch.soonest
     assert soonest > 0
   end
 
   def test_scheduler_remove
     sch = @db.scheduler
-    sch.add(name: "nightly", queue: "health", cron: "0 0 * * *", payload: {})
+    sch.add(name: "nightly", queue: "health", schedule: "0 0 * * *", payload: {})
     removed = sch.remove("nightly")
     assert_equal 1, removed
     assert_equal 0, sch.soonest
@@ -177,7 +177,7 @@ class HonkerParityTest < Minitest::Test
   def test_scheduler_tick_fires_due_task
     sch = @db.scheduler
     # "* * * * *" fires every minute — next_fire_at lands within a minute.
-    sch.add(name: "every-min", queue: "beats", cron: "* * * * *", payload: { ok: true })
+    sch.add(name: "every-min", queue: "beats", schedule: "* * * * *", payload: { ok: true })
     # Tick far enough in the future to guarantee a fire.
     fires = sch.tick(Time.now.to_i + 3_600)
     assert fires.length >= 1
@@ -185,6 +185,24 @@ class HonkerParityTest < Minitest::Test
     assert_equal "every-min", fire.name
     assert_equal "beats", fire.queue
     assert fire.job_id > 0
+  end
+
+  def test_scheduler_accepts_interval_schedule_alias
+    sch = @db.scheduler
+    sch.add(name: "fast", queue: "beats", schedule: "@every 1s", payload: { ok: true })
+    soonest = sch.soonest
+    assert soonest > 0
+
+    fires = sch.tick(soonest)
+    assert_equal 1, fires.length
+    assert_equal "fast", fires.first.name
+  end
+
+  def test_scheduler_accepts_legacy_cron_alias
+    sch = @db.scheduler
+    sch.add(name: "legacy", queue: "beats", cron: "@every 1s", payload: { ok: true })
+    soonest = sch.soonest
+    assert soonest > 0
   end
 
   def test_scheduler_run_start_and_stop
@@ -203,6 +221,69 @@ class HonkerParityTest < Minitest::Test
     flag.value = true
     t.join(5)
     refute t.alive?, "scheduler thread should exit when stop is set"
+  end
+
+  def test_scheduler_run_fires_every_second_schedule
+    sch = @db.scheduler
+    q = @db.queue("fast")
+    sch.add(name: "fast", queue: "fast", schedule: "@every 1s", payload: { ok: true })
+
+    flag = Struct.new(:value).new(false)
+    stopper = Struct.new(:flag) do
+      def stop?
+        flag.value
+      end
+    end.new(flag)
+
+    t = Thread.new { sch.run(owner: "host-fast", stop: stopper) }
+    begin
+      deadline = Time.now + 3
+      job = nil
+      while Time.now < deadline
+        job = q.claim_one("worker-fast")
+        break if job
+        sleep 0.05
+      end
+
+      refute_nil job, "expected every-second schedule to enqueue within 3s"
+      assert_equal({ "ok" => true }, job.payload)
+      assert job.ack
+    ensure
+      flag.value = true
+      t.join(5)
+    end
+  end
+
+  def test_scheduler_run_wakes_when_new_schedule_is_registered
+    sch = @db.scheduler
+    q = @db.queue("wake")
+    flag = Struct.new(:value).new(false)
+    stopper = Struct.new(:flag) do
+      def stop?
+        flag.value
+      end
+    end.new(flag)
+
+    t = Thread.new { sch.run(owner: "host-wake", stop: stopper) }
+    begin
+      sleep 0.2
+      sch.add(name: "wake-fast", queue: "wake", schedule: "@every 1s", payload: { wake: true })
+
+      deadline = Time.now + 3
+      job = nil
+      while Time.now < deadline
+        job = q.claim_one("worker-wake")
+        break if job
+        sleep 0.05
+      end
+
+      refute_nil job, "expected sleeping scheduler to wake after new schedule registration"
+      assert_equal({ "wake" => true }, job.payload)
+      assert job.ack
+    ensure
+      flag.value = true
+      t.join(5)
+    end
   end
 
   # -----------------------------------------------------------------
