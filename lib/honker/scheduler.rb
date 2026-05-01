@@ -10,7 +10,7 @@ module Honker
     end
   end
 
-  # Cron-style scheduler. Register tasks with `add`; `tick` fires all
+  # Time-trigger scheduler. Register tasks with `add`; `tick` fires all
   # boundaries that have elapsed since the last tick and enqueues the
   # resulting jobs. `run(owner:, stop:)` drives the loop under a
   # leader-elected advisory lock.
@@ -33,12 +33,22 @@ module Honker
       @db = db
     end
 
-    # Register a cron-scheduled task. Idempotent by `name`; registering
-    # the same name twice replaces the previous row.
-    def add(name:, queue:, cron:, payload:, priority: 0, expires_s: nil)
+    # Register a scheduled task. `cron:` is kept for backward
+    # compatibility; `schedule:` is the clearer name and can hold:
+    #
+    # - 5-field cron
+    # - 6-field cron
+    # - `@every <n><unit>` like `@every 1s`
+    #
+    # Idempotent by `name`; registering the same name twice replaces
+    # the previous row.
+    def add(name:, queue:, cron: nil, schedule: nil, payload:, priority: 0, expires_s: nil)
+      expr = schedule || cron
+      raise ArgumentError, "must provide cron: or schedule:" if expr.nil? || expr.empty?
+
       @db.db.get_first_row(
         "SELECT honker_scheduler_register(?, ?, ?, ?, ?, ?)",
-        [name, queue, cron, JSON.dump(payload), priority, expires_s],
+        [name, queue, expr, JSON.dump(payload), priority, expires_s],
       )
       nil
     end
@@ -138,7 +148,18 @@ module Honker
 
           last_heartbeat = monotonic_now
         end
-        sleep(1)
+
+        wait_s = HEARTBEAT_S - (monotonic_now - last_heartbeat)
+        wait_s = 0 if wait_s.negative?
+
+        next_fire = soonest
+        if next_fire.positive?
+          until_next = next_fire - Time.now.to_i
+          until_next = 0 if until_next.negative?
+          wait_s = [wait_s, until_next].min
+        end
+
+        sleep_with_stop(wait_s, stop_fn)
       end
     end
 

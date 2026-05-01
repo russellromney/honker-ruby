@@ -187,6 +187,17 @@ class HonkerParityTest < Minitest::Test
     assert fire.job_id > 0
   end
 
+  def test_scheduler_accepts_interval_schedule_alias
+    sch = @db.scheduler
+    sch.add(name: "fast", queue: "beats", schedule: "@every 1s", payload: { ok: true })
+    soonest = sch.soonest
+    assert soonest > 0
+
+    fires = sch.tick(soonest)
+    assert_equal 1, fires.length
+    assert_equal "fast", fires.first.name
+  end
+
   def test_scheduler_run_start_and_stop
     sch = @db.scheduler
     stop = Struct.new(:flag) do
