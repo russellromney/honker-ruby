@@ -223,6 +223,69 @@ class HonkerParityTest < Minitest::Test
     refute t.alive?, "scheduler thread should exit when stop is set"
   end
 
+  def test_scheduler_run_fires_every_second_schedule
+    sch = @db.scheduler
+    q = @db.queue("fast")
+    sch.add(name: "fast", queue: "fast", schedule: "@every 1s", payload: { ok: true })
+
+    flag = Struct.new(:value).new(false)
+    stopper = Struct.new(:flag) do
+      def stop?
+        flag.value
+      end
+    end.new(flag)
+
+    t = Thread.new { sch.run(owner: "host-fast", stop: stopper) }
+    begin
+      deadline = Time.now + 3
+      job = nil
+      while Time.now < deadline
+        job = q.claim_one("worker-fast")
+        break if job
+        sleep 0.05
+      end
+
+      refute_nil job, "expected every-second schedule to enqueue within 3s"
+      assert_equal({ "ok" => true }, job.payload)
+      assert job.ack
+    ensure
+      flag.value = true
+      t.join(5)
+    end
+  end
+
+  def test_scheduler_run_wakes_when_new_schedule_is_registered
+    sch = @db.scheduler
+    q = @db.queue("wake")
+    flag = Struct.new(:value).new(false)
+    stopper = Struct.new(:flag) do
+      def stop?
+        flag.value
+      end
+    end.new(flag)
+
+    t = Thread.new { sch.run(owner: "host-wake", stop: stopper) }
+    begin
+      sleep 0.2
+      sch.add(name: "wake-fast", queue: "wake", schedule: "@every 1s", payload: { wake: true })
+
+      deadline = Time.now + 3
+      job = nil
+      while Time.now < deadline
+        job = q.claim_one("worker-wake")
+        break if job
+        sleep 0.05
+      end
+
+      refute_nil job, "expected sleeping scheduler to wake after new schedule registration"
+      assert_equal({ "wake" => true }, job.payload)
+      assert job.ack
+    ensure
+      flag.value = true
+      t.join(5)
+    end
+  end
+
   # -----------------------------------------------------------------
   # Lock
   # -----------------------------------------------------------------
